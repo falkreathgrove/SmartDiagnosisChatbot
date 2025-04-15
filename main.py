@@ -3,13 +3,14 @@
 # and
 # https://platform.openai.com/docs/guides/vision
 
-from fastapi import FastAPI, Form, File, UploadFile
+from fastapi import FastAPI, Form, File, UploadFile, Request
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 import io
 from typing import List
 import group5_diagnosis_chatbot.util as group5_diagnosis_chatbot_util
 import os
+import base64
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -106,37 +107,11 @@ async def chat_diagnostic_model_model_ye(
 
 
 @app.post("/diagnosis_chatbot_ye/chat/gpt")
-async def chat_gpt_ye(
-    text: str = Form(None),
-    user: str = Form(None),
-    patient: str = Form(None),
-    time: str = Form(None),
-    image: UploadFile = File(None),
-):
-    def format_image_key(data):
-        return f"{data["user_id"]}/{data["patient_id"]}/{data["session_time"]}/{data["image_key"]}"
-
+async def chat_gpt_ye(request: Request):
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY_YE")
     client = OpenAI(api_key=OPENAI_API_KEY)
 
-    time = time.replace("/", "-")
-
-    data = {
-        "user_id": user,
-        "patient_id": patient,
-        "session_time": time,
-        "role": "user",
-        "message": text,
-        "image_key": image.filename if image is not None else "None",
-    }
-
-    if image:
-        data["image_key"] = format_image_key(data)
-        group5_diagnosis_chatbot_util.upload_content(data, image)
-    else:
-        group5_diagnosis_chatbot_util.upload_content(data, None)
-
-    contents = group5_diagnosis_chatbot_util.get_contents(user, patient, time)
+    form = await request.form()
 
     history = [
         {
@@ -145,27 +120,47 @@ async def chat_gpt_ye(
         }
     ]
 
-    for row in contents:
-        if row["image_key"] == "None":
+    i = 0
+    while f"history[{i}][role]" in form:
+        role = form.get(f"history[{i}][role]")
+        text = form.get(f"history[{i}][text]")
+        imageURL = form.get(f"history[{i}][imageURL]")
+        imageFile = form.get(f"history[{i}][imageFile]")
+
+        image_base64 = None
+        if not isinstance(imageFile, str):
+            image_read = await imageFile.read()
+            image_base64 = base64.b64encode(image_read).decode("utf-8")
+
+        image = "None"
+        if imageURL != "":
+            image = imageURL
+        else:
+            if image_base64 != None:
+                image = f"data:image/jpeg;base64,{image_base64}"
+
+        if image == "None":
             history.append(
                 {
-                    "role": row["role"],
-                    "content": row["message"],
+                    "role": role,
+                    "content": text,
                 }
             )
         else:
             history.append(
                 {
-                    "role": row["role"],
+                    "role": role,
                     "content": [
-                        {"type": "text", "text": row["message"]},
+                        {"type": "text", "text": text},
                         {
                             "type": "image_url",
-                            "image_url": {"url": row["image_key"]},
+                            "image_url": {"url": image},
                         },
                     ],
                 }
             )
+
+        i += 1
 
     completion = client.chat.completions.create(
         model="gpt-4o",
@@ -182,18 +177,56 @@ async def chat_gpt_ye(
         temperature=1,
     )
 
-    data = {
-        "user_id": user,
-        "patient_id": patient,
-        "session_time": time,
-        "role": "assistant",
-        "message": completion.choices[0].message.content,
-        "image_key": "None",
-    }
-
-    group5_diagnosis_chatbot_util.upload_content(data, None)
-
     return {"response": completion.choices[0].message.content}
+
+
+@app.post("/diagnosis_chatbot_ye/gpt_save_chat")
+async def gpt_save_chat_ye(request: Request):
+
+    def format_image_key(data):
+        return f"{data["user_id"]}/{data["patient_id"]}/{data["session_time"]}/{data["image_key"]}"
+
+    form = await request.form()
+
+    user = form.get("user")
+    patient = form.get("patient")
+    time = form.get("time")
+    time = time.replace("/", "-")
+
+    i = 0
+    while f"history[{i}][role]" in form:
+        role = form.get(f"history[{i}][role]")
+        text = form.get(f"history[{i}][text]")
+        imageFile = form.get(f"history[{i}][imageFile]")
+        saved = form.get(f"history[{i}][saved]")
+
+        if saved == "true":
+            i += 1
+            continue
+
+        data = {
+            "user_id": user,
+            "patient_id": patient,
+            "session_time": time,
+            "role": role,
+            "message": text,
+            "image_key": "",
+        }
+
+        if not isinstance(imageFile, str):
+            data["image_key"] = imageFile.filename
+        else:
+            data["image_key"] = "None"
+
+        if not isinstance(imageFile, str):
+            data["image_key"] = format_image_key(data)
+            group5_diagnosis_chatbot_util.upload_content(data, imageFile)
+        else:
+            group5_diagnosis_chatbot_util.upload_content(data, None)
+
+        i += 1
+
+    return {"status": "success save"}
 
 
 @app.post("/diagnosis_chatbot_ye/gpt_past_chats")
